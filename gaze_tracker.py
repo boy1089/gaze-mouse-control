@@ -42,8 +42,8 @@ class GazeTracker:
             smoothing_window: 이동 평균 필터에 사용할 프레임 수
         """
         self.cap = cv2.VideoCapture(camera_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
         base_options = mp.tasks.BaseOptions(model_asset_path=MODEL_PATH)
@@ -64,6 +64,9 @@ class GazeTracker:
         self._y_buffer = deque(maxlen=smoothing_window)
 
         self._running = True
+
+        # 캘리브레이션 파라미터 (None이면 하드코딩 사용)
+        self._calib = None
 
         # 디버그용: 마지막 프레임/랜드마크 저장
         self._last_frame = None
@@ -170,14 +173,17 @@ class GazeTracker:
         self._last_iris_ratio = (raw_x, raw_y)
 
         # 홍채 비율을 화면 좌표 비율로 변환
-        # 홍채가 눈 안에서 움직이는 범위는 약 0.25~0.75 정도이므로 스케일링
-        # 민감도 조절을 위한 매핑 (중앙 기준 확장)
-        center_x, center_y = 0.5, 0.5
-        sensitivity_x = 2.5  # 수평 민감도
-        sensitivity_y = 3.0  # 수직 민감도
-
-        screen_x = center_x + (raw_x - center_x) * sensitivity_x
-        screen_y = center_y + (raw_y - center_y) * sensitivity_y
+        if self._calib is not None:
+            # 캘리브레이션 매핑: screen = offset + scale * iris_ratio
+            screen_x = self._calib["offset_x"] + self._calib["scale_x"] * raw_x
+            screen_y = self._calib["offset_y"] + self._calib["scale_y"] * raw_y
+        else:
+            # 폴백: 하드코딩된 민감도 매핑
+            center_x, center_y = 0.5, 0.5
+            sensitivity_x = 2.5  # 수평 민감도
+            sensitivity_y = 3.0  # 수직 민감도
+            screen_x = center_x + (raw_x - center_x) * sensitivity_x
+            screen_y = center_y + (raw_y - center_y) * sensitivity_y
 
         # 0~1 범위로 클리핑
         screen_x = np.clip(screen_x, 0.0, 1.0)
@@ -191,6 +197,30 @@ class GazeTracker:
         smoothed_y = sum(self._y_buffer) / len(self._y_buffer)
 
         return smoothed_x, smoothed_y
+
+    def get_raw_iris_ratio(self):
+        """
+        마지막 프레임의 raw iris ratio를 반환합니다 (smoothing 없이).
+        캘리브레이션 데이터 수집용.
+
+        Returns:
+            (ratio_x, ratio_y) 또는 None
+        """
+        return self._last_iris_ratio
+
+    def set_calibration(self, params):
+        """
+        캘리브레이션 파라미터를 설정합니다.
+
+        Args:
+            params: {offset_x, scale_x, offset_y, scale_y} dict 또는 None (초기화)
+        """
+        self._calib = params
+        if params:
+            print(f"캘리브레이션 적용됨: scale=({params['scale_x']:.3f}, {params['scale_y']:.3f})")
+        # smoothing 버퍼 초기화 (새 캘리브레이션 적용 시 이전 데이터 제거)
+        self._x_buffer.clear()
+        self._y_buffer.clear()
 
     def get_debug_frame(self):
         """
